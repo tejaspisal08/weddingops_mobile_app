@@ -1182,7 +1182,9 @@ document.addEventListener("change", function (e) {
 });
 
 /* ============ share changes between two phones (no server) ============ */
-var CHUNK = 550, qrTimer = null, cam = null;
+/* ~200 chars per code keeps each QR around 53x53 modules, which a phone camera can read off another screen.
+   550 chars made 81x81 codes that cameras could not resolve. */
+var CHUNK = 200, CYCLE_MS = 800, qrTimer = null, cam = null;
 function buildPacket(all) {
   stamp(false);
   var since = all ? 0 : num(S.sync.out), c = {}, s = {}, t = {}, n = 0;
@@ -1213,7 +1215,7 @@ function showCodes(all) {
   var p = buildPacket(all);
   if (!p.n) { toast("Nothing new to share since last time. Choose Everything to send the whole plan."); return; }
   packetCodes(p).then(function (codes) {
-    var i = 0, big = codes.length > 24;
+    var i = 0, big = codes.length > 40;
     dialog('<h2 class="wt">Show this to your partner</h2><p class="para">' + plural(p.n, "change") + '. On their phone, open Share with partner, tap Scan, and hold the camera over these codes until it says Done.</p>' +
       (big ? '<p class="warn">This is a big update (' + codes.length + ' codes). Sending it as a file is quicker.</p>' : "") +
       '<div class="qrbox" id="qrbox" aria-label="Sharing code"></div><p class="qrn" id="qrn"></p>' +
@@ -1224,7 +1226,7 @@ function showCodes(all) {
     });
     $("#dlg").addEventListener("close", function () { clearInterval(qrTimer); }, { once: true });
     var draw = function () { var b = $("#qrbox"); if (!b) { clearInterval(qrTimer); return; } b.innerHTML = qrSVG(codes[i]); $("#qrn").textContent = codes.length > 1 ? "Code " + (i + 1) + " of " + codes.length + ", these keep cycling" : "One code"; i = (i + 1) % codes.length; };
-    draw(); clearInterval(qrTimer); if (codes.length > 1) qrTimer = setInterval(draw, 450);
+    draw(); clearInterval(qrTimer); if (codes.length > 1) qrTimer = setInterval(draw, CYCLE_MS);
   });
 }
 function saveSync() { var keep = undoStack.length; save(); undoStack.length = keep; }
@@ -1251,9 +1253,10 @@ function scan() {
   var got = {}, need = 0, kind = "z", sid = null, det = null, cv = document.createElement("canvas"), cx = cv.getContext("2d", { willReadFrequently: true });
   try { if ("BarcodeDetector" in window) det = new BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { det = null; }
   cam = { stop: false };
-  navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } }, audio: false }).then(function (stream) {
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }).then(function (stream) {
     if (!cam) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
     cam.stream = stream; var v = $("#camv"); v.srcObject = stream; v.play(); $("#camn").textContent = "Looking for a code";
+    try { var trk = stream.getVideoTracks()[0], caps = trk.getCapabilities ? trk.getCapabilities() : {}; if (caps.focusMode && caps.focusMode.indexOf("continuous") >= 0) trk.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function () {}); } catch (e) {}
     var busy = false;
     var handle = function (text) {
       var m = /^WO1:(\w+):(\d+):(\d+):([zj]):(.+)$/.exec(text || ""); if (!m) return;
@@ -1265,8 +1268,11 @@ function scan() {
     var tick = function () {
       if (!cam || cam.stop) return;
       if (v.readyState >= 2 && !busy) {
-        var sc = Math.min(1, 800 / Math.max(v.videoWidth, v.videoHeight)); cv.width = Math.round(v.videoWidth * sc); cv.height = Math.round(v.videoHeight * sc);
-        cx.drawImage(v, 0, 0, cv.width, cv.height);
+        // Scan the centre square (what the user sees in the square viewfinder) at full camera resolution,
+        // capped at 1000px. Shrinking the whole frame left too few pixels per QR module to decode.
+        var side = Math.min(v.videoWidth, v.videoHeight), sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2, out = Math.min(side, 1000);
+        if (cv.width !== out) { cv.width = out; cv.height = out; }
+        cx.drawImage(v, sx, sy, side, side, 0, 0, out, out);
         if (det) { busy = true; det.detect(cv).then(function (r) { busy = false; r.forEach(function (x) { handle(x.rawValue); }); }).catch(function () { busy = false; det = null; }); }
         else { var img = cx.getImageData(0, 0, cv.width, cv.height), r = jsQR(img.data, cv.width, cv.height, { inversionAttempts: "dontInvert" }); if (r) handle(r.data); }
       }
